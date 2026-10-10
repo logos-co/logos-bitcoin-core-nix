@@ -95,6 +95,21 @@ and with `--tor[=host:port]` signet cycles through the SOCKS proxy that report w
 cycle reached a peer. On Windows, copy `packages.x86_64-windows.bitcoind-c-test`'s `bin/` over
 and run `bitcoind-c-test.exe <workdir>`.
 
+## Verified, 2026-10-10
+
+| Target | Where | Exports | Harness |
+|---|---|---|---|
+| aarch64-darwin | nix on an M-series Mac | 9, cctools `nm` | PASS: three regtest cycles in 72–479 ms to running and 116–285 ms to stop; regtest → signet → regtest; two `-server=1` cycles; Tor through 127.0.0.1:9050, 3 of 3 cycles reached a peer (7, 41 and 26 s) |
+| x86_64-linux | nix on framework.lan, sandboxed | 9, `nm -D` | PASS: cycles in 20–141 ms to running and 55–107 ms to stop |
+| x86_64-windows | cross from x86_64-linux, run on Windows 10.0.26200 | 9; imports only Windows' DLLs and the UCRT | PASS: cycles in 63–203 ms and 63–125 ms; two `-server=1` cycles; Tor via `tor.exe`, 3 of 3 cycles reached a peer (27, 55 and 7 s) |
+
+The same Tor cycles with `g_socks5_interrupt.reset()` removed reached no peer in 2 of 2 cycles
+(150 s each), the first of them already after an earlier stop in the process.
+
+The macOS library is 10 MB, and its runtime closure is itself plus libc++; the Windows DLL is
+17.5 MB with GCC's runtime inside. x86_64-darwin and aarch64-linux evaluate but have not been
+built: there was no builder for them.
+
 ## Licence
 
 Bitcoin Core is MIT (`lib/COPYING.bitcoin`). LevelDB, secp256k1, crc32c, minisketch and
