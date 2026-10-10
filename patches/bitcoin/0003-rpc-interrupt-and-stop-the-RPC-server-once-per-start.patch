@@ -1,0 +1,66 @@
+From f38e191495bef705043d4c752df223b891289211 Mon Sep 17 00:00:00 2001
+From: Dario Gabriel Lipicar <dario@status.im>
+Date: Sat, 10 Oct 2026 20:07:19 -0300
+Subject: [PATCH 3/4] rpc: let the RPC server be interrupted and stopped once
+ per start
+
+InterruptRPC() and StopRPC() run their bodies once per process through
+static std::once_flags. In a process that starts the server a second
+time, InterruptRPC() never clears g_rpc_running again and StopRPC()'s
+assert aborts. Track both per start, reset by StartRPC().
+---
+ src/rpc/server.cpp | 26 ++++++++++++++------------
+ 1 file changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/src/rpc/server.cpp b/src/rpc/server.cpp
+index cddd62f..31597f5 100644
+--- a/src/rpc/server.cpp
++++ b/src/rpc/server.cpp
+@@ -270,33 +270,35 @@ bool CRPCTable::removeCommand(const std::string& name, const CRPCCommand* pcmd)
+     return false;
+ }
+ 
++// Once per start rather than once per process, so the server can be started again.
++static std::atomic<bool> g_rpc_interrupted{false};
++static std::atomic<bool> g_rpc_stopped{false};
++
+ void StartRPC()
+ {
+     LogDebug(BCLog::RPC, "Starting RPC\n");
++    g_rpc_interrupted = false;
++    g_rpc_stopped = false;
+     g_rpc_running = true;
+ }
+ 
+ void InterruptRPC()
+ {
+-    static std::once_flag g_rpc_interrupt_flag;
+     // This function could be called twice if the GUI has been started with -server=1.
+-    std::call_once(g_rpc_interrupt_flag, []() {
+-        LogDebug(BCLog::RPC, "Interrupting RPC\n");
+-        // Interrupt e.g. running longpolls
+-        g_rpc_running = false;
+-    });
++    if (g_rpc_interrupted.exchange(true)) return;
++    LogDebug(BCLog::RPC, "Interrupting RPC\n");
++    // Interrupt e.g. running longpolls
++    g_rpc_running = false;
+ }
+ 
+ void StopRPC()
+ {
+-    static std::once_flag g_rpc_stop_flag;
+     // This function could be called twice if the GUI has been started with -server=1.
+     assert(!g_rpc_running);
+-    std::call_once(g_rpc_stop_flag, [&]() {
+-        LogDebug(BCLog::RPC, "Stopping RPC\n");
+-        DeleteAuthCookie();
+-        LogDebug(BCLog::RPC, "RPC stopped.\n");
+-    });
++    if (g_rpc_stopped.exchange(true)) return;
++    LogDebug(BCLog::RPC, "Stopping RPC\n");
++    DeleteAuthCookie();
++    LogDebug(BCLog::RPC, "RPC stopped.\n");
+ }
+ 
+ bool IsRPCRunning()

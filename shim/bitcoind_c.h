@@ -29,8 +29,9 @@ enum BITCOIND_State {
 };
 
 // Parses `argv_json`, a JSON array of bitcoind flags, then starts the node on its own thread
-// and returns. -server=0 and -printtoconsole=0 always apply. Non-zero means refused; see
-// BITCOIND_last_error(). One node per process; a stopped node can be started again.
+// and returns. -server=0 and -printtoconsole=0 are the defaults; -server=1 opens Core's HTTP
+// RPC server. Non-zero means refused; see BITCOIND_last_error(). One node per process; a
+// stopped node can be started again.
 BITCOIND_API int BITCOIND_start(const char* argv_json);
 
 // Signals the node, waits for its shutdown and releases it. Idempotent; any thread.

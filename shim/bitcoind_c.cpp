@@ -335,10 +335,9 @@ int BITCOIND_start(const char* argv_json)
     gArgs.ClearArgs();
     gArgs.ClearPathCache();
     SetupServerArgs(gArgs, /*can_listen_ipc=*/false);
-    std::vector<std::string> full{"bitcoind"};
+    // Defaults first: the last value wins, so a caller can still ask for Core's HTTP RPC server.
+    std::vector<std::string> full{"bitcoind", "-server=0", "-printtoconsole=0"};
     full.insert(full.end(), args.begin(), args.end());
-    full.emplace_back("-server=0");
-    full.emplace_back("-printtoconsole=0");
     std::vector<const char*> argv;
     for (const auto& a : full) argv.push_back(a.c_str());
     if (!gArgs.ParseParameters(static_cast<int>(argv.size()), argv.data(), err)) {

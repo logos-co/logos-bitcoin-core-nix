@@ -11,7 +11,10 @@ packages.<target>.bitcoind-c-test    # the C test harness
 checks.<system>.harness              # runs the harness offline against the library
 ```
 
-Targets: `aarch64-darwin`, `x86_64-darwin`, `aarch64-linux`, `x86_64-linux`.
+Targets: `aarch64-darwin`, `x86_64-darwin`, `aarch64-linux`, `x86_64-linux`, and
+`x86_64-windows`, a cross build from x86_64-linux with logos-nix's MinGW (GCC, mcf threads,
+UCRT). The Windows DLL links GCC's runtime and mcfgthread statically, so it imports only
+Windows' own DLLs; `packages.x86_64-windows.bitcoind-c-test` is the harness beside it.
 
 ## The C ABI
 
@@ -20,7 +23,7 @@ returns is owned by the caller and released with `BITCOIND_free`.
 
 | Function | |
 |---|---|
-| `BITCOIND_start(argv_json)` | Parses a JSON array of bitcoind flags and starts the node on its own thread. `-server=0` and `-printtoconsole=0` always apply |
+| `BITCOIND_start(argv_json)` | Parses a JSON array of bitcoind flags and starts the node on its own thread. `-server=0` and `-printtoconsole=0` are the defaults; `-server=1` opens Core's HTTP RPC server |
 | `BITCOIND_stop()` | Signals the node and waits for its shutdown. Idempotent, any thread |
 | `BITCOIND_state()` | `STOPPED`, `STARTING`, `RUNNING`, `STOPPING` or `FAILED` |
 | `BITCOIND_status_json()` | State, network, data dir, log file, uptime, version, init message, last error |
@@ -51,14 +54,16 @@ one cycle. The wrapper (`shim/bitcoind_c.cpp`) makes a stopped node startable ag
   return, `Shutdown`, `DisconnectTestLogger()`, `ReleaseDirectoryLocks()`. `Shutdown` renames
   its thread, so it runs on the node's own thread, never the caller's.
 
-Two patches, each held to an allowlist that `nix/bitcoin-core-src.nix` checks at build time:
+Four patches, each held to an allowlist that `nix/bitcoin-core-src.nix` checks at build time:
 
 | Patch | Files | Why |
 |---|---|---|
 | 0001 | `src/init.cpp` | Reset `g_local_services` and `g_enabled_filter_types` at the start of `AppInitParameterInteraction`. Both only accumulate, so a node restarted with pruning would keep advertising full blocks |
 | 0002 | `src/netbase.cpp`, `src/netbase.h` | `ClearProxies()`: `SetProxy` refuses an invalid proxy, so nothing could unset an earlier run's `-proxy` |
+| 0003 | `src/rpc/server.cpp` | Only for `-server=1`: `InterruptRPC`/`StopRPC` ran once per process through static `std::once_flag`s, so a second stop aborted on `StopRPC`'s assert. Now once per start |
+| 0004 | `src/httprpc.cpp` | Only for `-server=1`: `g_rpcauth` and `g_rpc_whitelist` only grew, so a restarted server accepted the previous cookie and intersected the previous whitelists |
 
-Consensus, validation, P2P and RPC code are upstream's.
+Consensus, validation, P2P code and the RPC methods are upstream's.
 
 ## The library
 
@@ -84,8 +89,11 @@ nix run .#bitcoind-c-test -- /tmp/bt --tor     # adds signet over Tor at 127.0.0
 
 The harness drives only the C ABI: refusals before a start, three start/stop cycles on
 regtest that mine blocks and read them back with `getblockchaininfo`, `getblockhash`,
-`getblock` and `getblockfilter`, a network switch, and with `--tor[=host:port]` signet cycles
-through the SOCKS proxy that report whether each cycle reached a peer.
+`getblock` and `getblockfilter`, a network switch, two `-server=1` cycles that call Core's HTTP
+server with each start's cookie and `-rpcwhitelist` (and the previous cookie, which must fail),
+and with `--tor[=host:port]` signet cycles through the SOCKS proxy that report whether each
+cycle reached a peer. On Windows, copy `packages.x86_64-windows.bitcoind-c-test`'s `bin/` over
+and run `bitcoind-c-test.exe <workdir>`.
 
 ## Licence
 

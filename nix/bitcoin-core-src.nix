@@ -1,6 +1,6 @@
 # Bitcoin Core at its release tag, fetched by hash, with patches/bitcoin replayed on top.
 # Each patch may touch only the files allowlisted for it below, and the build asserts that:
-# consensus, validation, P2P and RPC code stay upstream's.
+# consensus, validation, P2P and RPC methods stay upstream's.
 { pkgs }:
 
 let
@@ -21,6 +21,10 @@ let
     "0001" = [ "src/init.cpp" ];
     # The proxies of an earlier init can't be unset without it.
     "0002" = [ "src/netbase.cpp" "src/netbase.h" ];
+    # Only with -server=1: a second InterruptRPC/StopRPC in one process would abort.
+    "0003" = [ "src/rpc/server.cpp" ];
+    # Only with -server=1: credentials and whitelists only accumulate.
+    "0004" = [ "src/httprpc.cpp" ];
   };
 
   allowCases = pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList (n: files:

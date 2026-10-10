@@ -1,6 +1,10 @@
 // Drives libbitcoind_c through its C ABI only: start/stop cycles in one process, a network
 // switch, in-process RPC, and optionally signet over a Tor SOCKS proxy.
 // Usage: bitcoind-c-test <workdir> [--tor[=host:port]] [--tor-cycles n] [--peer-timeout secs]
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L // getaddrinfo, clock_gettime and nanosleep under -std=c11
+#endif
+
 #include "bitcoind_c.h"
 
 #include <stdint.h>
@@ -14,8 +18,10 @@
 #include <windows.h>
 #include <direct.h>
 #else
+#include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -273,6 +279,131 @@ static int tcp_reachable(const char* host, const char* port)
     return ok;
 }
 
+static int free_port(void)
+{
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(0x7f000001UL);
+    socklen_t len = sizeof a;
+    int port = 0;
+#ifdef _WIN32
+    SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == INVALID_SOCKET) return 0;
+    if (bind(s, (struct sockaddr*)&a, sizeof a) == 0 && getsockname(s, (struct sockaddr*)&a, &len) == 0) port = ntohs(a.sin_port);
+    closesocket(s);
+#else
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 0;
+    if (bind(s, (struct sockaddr*)&a, sizeof a) == 0 && getsockname(s, (struct sockaddr*)&a, &len) == 0) port = ntohs(a.sin_port);
+    close(s);
+#endif
+    return port;
+}
+
+static void base64(const char* in, char* out)
+{
+    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const size_t n = strlen(in);
+    size_t j = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        const unsigned v = ((unsigned char)in[i] << 16) | (i + 1 < n ? (unsigned char)in[i + 1] << 8 : 0) |
+                           (i + 2 < n ? (unsigned char)in[i + 2] : 0);
+        out[j++] = t[(v >> 18) & 63];
+        out[j++] = t[(v >> 12) & 63];
+        out[j++] = i + 1 < n ? t[(v >> 6) & 63] : '=';
+        out[j++] = i + 2 < n ? t[v & 63] : '=';
+    }
+    out[j] = 0;
+}
+
+// One JSON-RPC call to Core's HTTP server. Returns the HTTP status, or -1.
+static int http_rpc(int port, const char* user_pass, const char* method, char* body, size_t n)
+{
+    char auth[512], payload[256], req[2048];
+    base64(user_pass, auth);
+    snprintf(payload, sizeof payload, "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"%s\",\"params\":[]}", method);
+    const int len = snprintf(req, sizeof req,
+                             "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic %s\r\n"
+                             "Content-Type: application/json\r\nContent-Length: %u\r\nConnection: close\r\n\r\n%s",
+                             auth, (unsigned)strlen(payload), payload);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(0x7f000001UL);
+    a.sin_port = htons((unsigned short)port);
+    char buf[65536];
+    int got = 0;
+#ifdef _WIN32
+    SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == INVALID_SOCKET || connect(s, (struct sockaddr*)&a, sizeof a) != 0) { if (s != INVALID_SOCKET) closesocket(s); return -1; }
+    send(s, req, len, 0);
+    for (int r; got < (int)sizeof buf - 1 && (r = recv(s, buf + got, (int)sizeof buf - 1 - got, 0)) > 0;) got += r;
+    closesocket(s);
+#else
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0 || connect(s, (struct sockaddr*)&a, sizeof a) != 0) { if (s >= 0) close(s); return -1; }
+    if (send(s, req, (size_t)len, 0) != len) { close(s); return -1; }
+    for (ssize_t r; got < (int)sizeof buf - 1 && (r = recv(s, buf + got, sizeof buf - 1 - (size_t)got, 0)) > 0;) got += (int)r;
+    close(s);
+#endif
+    buf[got] = 0;
+    int status = -1;
+    if (sscanf(buf, "HTTP/1.%*d %d", &status) != 1) return -1;
+    const char* b = strstr(buf, "\r\n\r\n");
+    snprintf(body, n, "%s", b ? b + 4 : "");
+    return status;
+}
+
+static int read_cookie(const char* path, char* out, size_t n)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    const size_t r = fread(out, 1, n - 1, f);
+    fclose(f);
+    out[r] = 0;
+    while (r && (out[strlen(out) - 1] == '\n' || out[strlen(out) - 1] == '\r')) out[strlen(out) - 1] = 0;
+    return out[0] != 0;
+}
+
+// Core's HTTP RPC server twice in one process: each start must issue its own cookie and apply
+// only its own -rpcwhitelist (patches 0003 and 0004).
+static void rpc_server_cycles(const char* workdir)
+{
+    char dir[4096], esc[4096], argv[8192], cookie_path[4200], first_cookie[512] = "";
+    snprintf(dir, sizeof dir, "%s/regtest-rpc", workdir);
+    mkdir_p(dir);
+    json_escape(dir, esc, sizeof esc);
+    snprintf(cookie_path, sizeof cookie_path, "%s/regtest/.cookie", dir);
+    const char* allowed[2] = {"getblockchaininfo", "getblockcount"};
+    for (int c = 0; c < 2; ++c) {
+        const int port = free_port();
+        snprintf(argv, sizeof argv,
+                 "[\"-regtest\",\"-datadir=%s\",\"-listen=0\",\"-connect=0\",\"-server=1\",\"-rpcbind=127.0.0.1\","
+                 "\"-rpcallowip=127.0.0.1\",\"-rpcport=%d\",\"-rpcwhitelist=__cookie__:%s\",\"-rpcwhitelistdefault=1\"]",
+                 esc, port, allowed[c]);
+        const long long up = start_and_wait(argv);
+        CHECK(up >= 0, "rpc server cycle %d: node did not reach running", c + 1);
+        if (up < 0) { BITCOIND_stop(); continue; }
+        char cookie[512] = "", body[65536];
+        CHECK(read_cookie(cookie_path, cookie, sizeof cookie), "rpc server cycle %d: no cookie at %s", c + 1, cookie_path);
+        const int ok_status = http_rpc(port, cookie, allowed[c], body, sizeof body);
+        CHECK(ok_status == 200 && strstr(body, "\"error\":null") != NULL, "rpc server cycle %d: %s -> %d %.200s", c + 1, allowed[c], ok_status, body);
+        const int denied = http_rpc(port, cookie, allowed[1 - c], body, sizeof body);
+        CHECK(denied == 403, "rpc server cycle %d: %s outside the whitelist -> %d", c + 1, allowed[1 - c], denied);
+        int stale = 0;
+        if (c == 0) {
+            snprintf(first_cookie, sizeof first_cookie, "%s", cookie);
+        } else {
+            stale = http_rpc(port, first_cookie, allowed[c], body, sizeof body);
+            CHECK(stale == 401 && strcmp(first_cookie, cookie) != 0, "rpc server cycle 2: the first cycle's cookie -> %d", stale);
+        }
+        const long long down = stop_timed();
+        printf("ok   rpc server cycle %d: port %d, %s -> %d, %s -> %d%s, stopped in %lld ms\n", c + 1, port, allowed[c],
+               ok_status, allowed[1 - c], denied, c ? (stale == 401 ? ", old cookie -> 401" : ", old cookie accepted") : "", down);
+    }
+}
+
 // Signet over Tor only: after a restart, a stale SOCKS5 interrupt would fail every connection.
 static void tor_cycles(const char* workdir, const char* proxy, int cycles, int peer_timeout_s)
 {
@@ -410,6 +541,8 @@ int main(int argc, char** argv)
     const long long rdown = stop_timed();
     printf("ok   switch regtest -> signet (running in %lld ms, stopped in %lld ms) -> regtest (height %lld, running in %lld ms, stopped in %lld ms)\n",
            sup, sdown, rheight, rup, rdown);
+
+    rpc_server_cycles(workdir);
 
     if (tor) tor_cycles(workdir, tor, tor_cycles_n, peer_timeout);
 

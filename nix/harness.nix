@@ -30,7 +30,7 @@ let
       for dll in $(${objdump} -p "$out/bin/${exe}" "$out/bin/libbitcoind_c.dll" | awk '/DLL Name:/ { print $3 }' | sort -u); do
         [ -e "$out/bin/$dll" ] && continue
         for dir in ${lib.concatMapStringsSep " " (p: "${p}/bin ${p}/lib") ([ stdenv.cc.cc.lib pkgs.windows.mcfgthreads ])}; do
-          found=$(find "$dir" -maxdepth 3 -iname "$dll" 2>/dev/null | head -1)
+          found=$(find "$dir" -maxdepth 3 -iname "$dll" 2>/dev/null | head -1 || true)
           if [ -n "$found" ]; then install -m0755 "$found" "$out/bin/"; break; fi
         done
       done

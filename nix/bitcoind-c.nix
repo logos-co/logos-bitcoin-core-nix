@@ -42,25 +42,31 @@ stdenv.mkDerivation {
     runHook postInstall
   '';
 
-  doInstallCheck = true;
+  # nixpkgs skips installCheck when it cannot run the host's binaries, so Windows checks the
+  # stripped DLL in postFixup instead.
+  doInstallCheck = !isWin;
   installCheckPhase = ''
     runHook preInstallCheck
-  '' + (if isWin then ''
+    bash ${../ci/check-exports.sh} "$out/lib/libbitcoind_c${ext}" "$out/include/bitcoind_c.h" \
+      ${if isDarwin then "${pkgs.cctools}/bin/nm" else "nm"}
+    runHook postInstallCheck
+  '';
+  postFixup = lib.optionalString isWin ''
     pe=$(${objdump} -p "$out/lib/libbitcoind_c.dll")
     # Exactly the functions the header declares, as ci/check-exports.sh asserts on Unix.
     want=$(grep -o -E 'BITCOIND_[a-z_]+\(' "$out/include/bitcoind_c.h" | tr -d '(' | sort -u)
     got=$(echo "$pe" | awk '/^\[Ordinal\/Name Pointer\] Table/ { t = 1; next } t && /^\t\[/ { print $NF } t && /^$/ { t = 0 }' | sort -u)
     [ "$got" = "$want" ] || { echo "exports of libbitcoind_c.dll differ from bitcoind_c.h:" >&2; diff <(echo "$want") <(echo "$got") >&2; exit 1; }
     echo "exports: $(echo "$got" | wc -l) BITCOIND_* functions and nothing else"
-    if echo "$pe" | grep -qi 'DLL Name: msvcrt.dll'; then
-      echo "libbitcoind_c.dll imports msvcrt.dll beside the UCRT" >&2; exit 1
-    fi
-    echo "imports: $(echo "$pe" | awk '/DLL Name:/ { print $3 }' | sort -fu | tr '\n' ' ')"
-  '' else ''
-    bash ${../ci/check-exports.sh} "$out/lib/libbitcoind_c${ext}" "$out/include/bitcoind_c.h" \
-      ${if isDarwin then "${pkgs.cctools}/bin/nm" else "nm"}
-  '') + ''
-    runHook postInstallCheck
+    # Core links -static: GCC's runtime and mcfgthread are inside, so only Windows itself is imported.
+    imports=$(echo "$pe" | awk '/DLL Name:/ { print $3 }' | sort -fu)
+    echo "imports: $(echo $imports)"
+    for dll in $imports; do
+      case "$(echo "$dll" | tr 'A-Z' 'a-z')" in
+        api-ms-win-crt-*|kernel32.dll|ntdll.dll|advapi32.dll|bcrypt.dll|iphlpapi.dll|shell32.dll|ws2_32.dll) ;;
+        *) echo "libbitcoind_c.dll imports $dll, which Windows does not ship" >&2; exit 1 ;;
+      esac
+    done
   '';
 
   # strip would invalidate the linker's ad-hoc signature on macOS.
