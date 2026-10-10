@@ -1,0 +1,29 @@
+From 396a7285211fd8f8f0600c776cc7d03f1115e103 Mon Sep 17 00:00:00 2001
+From: Dario Gabriel Lipicar <dario@status.im>
+Date: Sat, 10 Oct 2026 19:38:09 -0300
+Subject: [PATCH 1/2] init: reset the advertised services and filter types at
+ each parameter interaction
+
+AppInitParameterInteraction only ever adds to g_local_services and
+g_enabled_filter_types. In a process that runs init more than once, a
+node restarted with pruning would keep advertising NODE_NETWORK, and a
+node restarted without -blockfilterindex would keep building filters.
+---
+ src/init.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/init.cpp b/src/init.cpp
+index fb4b8fa..147ae37 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -918,6 +918,10 @@ bool AppInitBasicSetup(const ArgsManager& args, std::atomic<int>& exit_status)
+ 
+ bool AppInitParameterInteraction(const ArgsManager& args)
+ {
++    // Both are only ever added to below, so a process that initializes twice starts from the defaults.
++    g_local_services = ServiceFlags(NODE_NETWORK_LIMITED | NODE_WITNESS);
++    g_enabled_filter_types.clear();
++
+     const CChainParams& chainparams = Params();
+     // ********************************************************* Step 2: parameter interactions
+ 

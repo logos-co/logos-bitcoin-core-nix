@@ -1,0 +1,44 @@
+From 36f1c4509358fb4ecab31106b85d07bf911fe8b0 Mon Sep 17 00:00:00 2001
+From: Dario Gabriel Lipicar <dario@status.im>
+Date: Sat, 10 Oct 2026 19:38:21 -0300
+Subject: [PATCH 2/2] netbase: add ClearProxies()
+
+SetProxy() and SetNameProxy() refuse an invalid proxy, so nothing can
+unset the proxies of an earlier init. A process that initializes twice
+would keep routing through the first run's -proxy.
+---
+ src/netbase.cpp | 7 +++++++
+ src/netbase.h   | 2 ++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/src/netbase.cpp b/src/netbase.cpp
+index c1c03c5..46189a0 100644
+--- a/src/netbase.cpp
++++ b/src/netbase.cpp
+@@ -706,6 +706,13 @@ bool SetProxy(enum Network net, const Proxy &addrProxy) {
+     return true;
+ }
+ 
++void ClearProxies()
++{
++    LOCK(g_proxyinfo_mutex);
++    for (Proxy& proxy : proxyInfo) proxy = Proxy{};
++    nameProxy = Proxy{};
++}
++
+ bool GetProxy(enum Network net, Proxy &proxyInfoOut) {
+     assert(net >= 0 && net < NET_MAX);
+     LOCK(g_proxyinfo_mutex);
+diff --git a/src/netbase.h b/src/netbase.h
+index 6e538a7..87d1178 100644
+--- a/src/netbase.h
++++ b/src/netbase.h
+@@ -181,6 +181,8 @@ std::vector<std::string> GetNetworkNames(bool append_unroutable = false);
+ bool SetProxy(enum Network net, const Proxy &addrProxy);
+ bool GetProxy(enum Network net, Proxy &proxyInfoOut);
+ bool IsProxy(const CNetAddr &addr);
++/** Forget every proxy set by SetProxy() and SetNameProxy(), for a process that initializes twice. */
++void ClearProxies();
+ /**
+  * Set the name proxy to use for all connections to nodes specified by a
+  * hostname. After setting this proxy, connecting to a node specified by a

@@ -1,0 +1,9 @@
+_BITCOIND_start
+_BITCOIND_stop
+_BITCOIND_state
+_BITCOIND_status_json
+_BITCOIND_rpc
+_BITCOIND_flush
+_BITCOIND_last_error
+_BITCOIND_free
+_BITCOIND_version

@@ -1,0 +1,11 @@
+LIBRARY libbitcoind_c.dll
+EXPORTS
+  BITCOIND_start
+  BITCOIND_stop
+  BITCOIND_state
+  BITCOIND_status_json
+  BITCOIND_rpc
+  BITCOIND_flush
+  BITCOIND_last_error
+  BITCOIND_free
+  BITCOIND_version
