@@ -94,7 +94,7 @@ regtest that mine blocks and read them back with `getblockchaininfo`, `getblockh
 server with each start's cookie and `-rpcwhitelist` (and the previous cookie, which must fail),
 three stops while `connect()`s to blackholed `-addnode`s are in flight (under 2 s each), and with `--tor[=host:port]` signet cycles through the SOCKS proxy that report whether each
 cycle reached a peer. On Windows, copy `packages.x86_64-windows.bitcoind-c-test`'s `bin/` over
-and run `bitcoind-c-test.exe <workdir>`.
+and run `bitcoind-c-test.exe <workdir>`; CI does that under wine and on windows-latest.
 
 ## Verified, 2026-10-10
 
@@ -111,7 +111,8 @@ A stop while the addnode thread connects to three blackholed addresses took 134â
 0005, and 3.69â€“3.73 s with the same harness against the library without it.
 
 The macOS library is 10 MB, and its runtime closure is itself plus libc++; the Windows DLL is
-17.5 MB with GCC's runtime inside. x86_64-darwin and aarch64-linux evaluate but have not been
+17.5 MB with GCC's runtime inside. On 2026-10-11 the Windows harness also passed under wine 11 on
+framework.lan, as CI's wine leg runs it. x86_64-darwin and aarch64-linux evaluate but have not been
 built: there was no builder for them.
 
 ## Licence
