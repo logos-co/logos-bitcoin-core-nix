@@ -366,6 +366,29 @@ static int read_cookie(const char* path, char* out, size_t n)
     return out[0] != 0;
 }
 
+// A stop while Core's addnode thread waits on connect() to unreachable addresses (patch 0005):
+// without it, Shutdown waited out -timeout (5 s). Offline in a sandbox the connects fail at once.
+static void stop_with_connect_in_flight(const char* workdir)
+{
+    char dir[4096], esc[4096], argv[8192];
+    snprintf(dir, sizeof dir, "%s/regtest-blackhole", workdir);
+    mkdir_p(dir);
+    json_escape(dir, esc, sizeof esc);
+    snprintf(argv, sizeof argv,
+             "[\"-regtest\",\"-datadir=%s\",\"-listen=0\",\"-connect=0\",\"-addnode=192.0.2.1:18444\","
+             "\"-addnode=198.51.100.1:18444\",\"-addnode=203.0.113.1:18444\"]",
+             esc);
+    for (int c = 1; c <= 3; ++c) {
+        const long long up = start_and_wait(argv);
+        CHECK(up >= 0, "blackhole cycle %d: node did not reach running", c);
+        if (up < 0) { BITCOIND_stop(); continue; }
+        sleep_ms(1500);
+        const long long down = stop_timed();
+        CHECK(down < 2000, "blackhole cycle %d: stop with a connect in flight took %lld ms", c, down);
+        printf("%s stop with connects to blackholed addnodes in flight, cycle %d: %lld ms\n", down < 2000 ? "ok  " : "slow", c, down);
+    }
+}
+
 // Core's HTTP RPC server twice in one process: each start must issue its own cookie and apply
 // only its own -rpcwhitelist (patches 0003 and 0004).
 static void rpc_server_cycles(const char* workdir)
@@ -543,6 +566,7 @@ int main(int argc, char** argv)
            sup, sdown, rheight, rup, rdown);
 
     rpc_server_cycles(workdir);
+    stop_with_connect_in_flight(workdir);
 
     if (tor) tor_cycles(workdir, tor, tor_cycles_n, peer_timeout);
 

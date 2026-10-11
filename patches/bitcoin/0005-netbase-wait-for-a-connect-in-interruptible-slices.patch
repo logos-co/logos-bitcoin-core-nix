@@ -1,0 +1,58 @@
+From 3737d59a16c4c9ad9413658dee1fe3b373c2b918 Mon Sep 17 00:00:00 2001
+From: Dario Gabriel Lipicar <dario@status.im>
+Date: Sat, 10 Oct 2026 21:02:59 -0300
+Subject: [PATCH 5/5] netbase: wait for an outbound connect in slices that
+ notice the network interrupt
+
+ConnectToSocket() waited for a non-blocking connect() for the whole of
+-timeout (5 s by default), and nothing could cut that short. A shutdown
+joins the connection threads, so a stop that arrived while one of them
+was connecting to an unreachable peer waited out the rest of the
+timeout. Wait in 100 ms slices instead and give up as soon as
+g_socks5_interrupt, which CConnman::Interrupt() already sets, is set.
+---
+ src/netbase.cpp | 24 ++++++++++++++++--------
+ 1 file changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/src/netbase.cpp b/src/netbase.cpp
+index 46189a0..d1fb472 100644
+--- a/src/netbase.cpp
++++ b/src/netbase.cpp
+@@ -16,6 +16,7 @@
+ #include <util/string.h>
+ #include <util/time.h>
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <chrono>
+ #include <cstdint>
+@@ -599,14 +600,21 @@ static bool ConnectToSocket(const Sock& sock, struct sockaddr* sockaddr, socklen
+             // asynchronously. Thus, use async I/O api (select/poll)
+             // synchronously to check for successful connection with a timeout.
+             const Sock::Event requested = Sock::RECV | Sock::SEND;
+-            Sock::Event occurred;
+-            if (!sock.Wait(std::chrono::milliseconds{nConnectTimeout}, requested, &occurred)) {
+-                LogInfo("wait for connect to %s failed: %s\n",
+-                          dest_str,
+-                          NetworkErrorString(WSAGetLastError()));
+-                return false;
+-            } else if (occurred == 0) {
+-                LogDebug(BCLog::NET, "connection attempt to %s timed out\n", dest_str);
++            Sock::Event occurred{0};
++            // In slices: CConnman::Interrupt() sets g_socks5_interrupt, and a shutdown must not wait out the timeout.
++            const auto deadline{SteadyClock::now() + std::chrono::milliseconds{nConnectTimeout}};
++            while (occurred == 0 && !g_socks5_interrupt) {
++                const auto left{std::chrono::duration_cast<std::chrono::milliseconds>(deadline - SteadyClock::now())};
++                if (left <= 0ms) break;
++                if (!sock.Wait(std::min<std::chrono::milliseconds>(left, 100ms), requested, &occurred)) {
++                    LogInfo("wait for connect to %s failed: %s\n",
++                              dest_str,
++                              NetworkErrorString(WSAGetLastError()));
++                    return false;
++                }
++            }
++            if (occurred == 0) {
++                LogDebug(BCLog::NET, "connection attempt to %s %s\n", dest_str, g_socks5_interrupt ? "interrupted" : "timed out");
+                 return false;
+             }
+ 

@@ -25,6 +25,8 @@ let
     "0003" = [ "src/rpc/server.cpp" ];
     # Only with -server=1: credentials and whitelists only accumulate.
     "0004" = [ "src/httprpc.cpp" ];
+    # A stop waited out -timeout for a connect() in flight; now it waits in interruptible slices.
+    "0005" = [ "src/netbase.cpp" ];
   };
 
   allowCases = pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList (n: files:

@@ -54,7 +54,7 @@ one cycle. The wrapper (`shim/bitcoind_c.cpp`) makes a stopped node startable ag
   return, `Shutdown`, `DisconnectTestLogger()`, `ReleaseDirectoryLocks()`. `Shutdown` renames
   its thread, so it runs on the node's own thread, never the caller's.
 
-Four patches, each held to an allowlist that `nix/bitcoin-core-src.nix` checks at build time:
+Five patches, each held to an allowlist that `nix/bitcoin-core-src.nix` checks at build time:
 
 | Patch | Files | Why |
 |---|---|---|
@@ -62,6 +62,7 @@ Four patches, each held to an allowlist that `nix/bitcoin-core-src.nix` checks a
 | 0002 | `src/netbase.cpp`, `src/netbase.h` | `ClearProxies()`: `SetProxy` refuses an invalid proxy, so nothing could unset an earlier run's `-proxy` |
 | 0003 | `src/rpc/server.cpp` | Only for `-server=1`: `InterruptRPC`/`StopRPC` ran once per process through static `std::once_flag`s, so a second stop aborted on `StopRPC`'s assert. Now once per start |
 | 0004 | `src/httprpc.cpp` | Only for `-server=1`: `g_rpcauth` and `g_rpc_whitelist` only grew, so a restarted server accepted the previous cookie and intersected the previous whitelists |
+| 0005 | `src/netbase.cpp` | `ConnectToSocket` waited out `-timeout` (5 s) for a `connect()` in flight, and `Shutdown` joins the connection threads, so a stop could take 5 s. It now waits in 100 ms slices and gives up once `g_socks5_interrupt`, which `CConnman::Interrupt()` already sets, is set. `-timeout` itself is unchanged |
 
 Consensus, validation, P2P code and the RPC methods are upstream's.
 
@@ -91,7 +92,7 @@ The harness drives only the C ABI: refusals before a start, three start/stop cyc
 regtest that mine blocks and read them back with `getblockchaininfo`, `getblockhash`,
 `getblock` and `getblockfilter`, a network switch, two `-server=1` cycles that call Core's HTTP
 server with each start's cookie and `-rpcwhitelist` (and the previous cookie, which must fail),
-and with `--tor[=host:port]` signet cycles through the SOCKS proxy that report whether each
+three stops while `connect()`s to blackholed `-addnode`s are in flight (under 2 s each), and with `--tor[=host:port]` signet cycles through the SOCKS proxy that report whether each
 cycle reached a peer. On Windows, copy `packages.x86_64-windows.bitcoind-c-test`'s `bin/` over
 and run `bitcoind-c-test.exe <workdir>`.
 
@@ -105,6 +106,9 @@ and run `bitcoind-c-test.exe <workdir>`.
 
 The same Tor cycles with `g_socks5_interrupt.reset()` removed reached no peer in 2 of 2 cycles
 (150 s each), the first of them already after an earlier stop in the process.
+
+A stop while the addnode thread connects to three blackholed addresses took 134–293 ms with
+0005, and 3.69–3.73 s with the same harness against the library without it.
 
 The macOS library is 10 MB, and its runtime closure is itself plus libc++; the Windows DLL is
 17.5 MB with GCC's runtime inside. x86_64-darwin and aarch64-linux evaluate but have not been
