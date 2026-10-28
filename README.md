@@ -4,7 +4,7 @@ Bitcoin Core's node, built as a shared library with a C ABI, so a Logos module c
 in-process instead of supervising a `bitcoind` executable.
 
 ```
-packages.<target>.bitcoin-core-src   # Bitcoin Core v31.1 (tag, by hash) + patches/bitcoin
+packages.<target>.bitcoin-core-src   # Bitcoin Core v31.2 (tag, by hash) + patches/bitcoin
 packages.<target>.libbitcoind_c      # libbitcoind_c: the node behind the C ABI in shim/bitcoind_c.h
 packages.<target>.libevent           # libevent 2.1.12 as Core's depends builds it, static
 packages.<target>.bitcoind-c-test    # the C test harness
@@ -96,7 +96,13 @@ three stops while `connect()`s to blackholed `-addnode`s are in flight (under 2 
 cycle reached a peer. On Windows, copy `packages.x86_64-windows.bitcoind-c-test`'s `bin/` over
 and run `bitcoind-c-test.exe <workdir>`; CI does that under wine and on windows-latest.
 
-## Verified, 2026-10-10
+## Verified, 2026-10-28: 31.2
+
+The five patches apply to v31.2 unchanged; none of 31.2's changes touches what they do. On
+aarch64-darwin the library exports its 9 functions and the harness passes: cycles in 149–251 ms
+to running and 259–315 ms to stop, and stops with connects in flight in 286–321 ms.
+
+## Verified, 2026-10-10: 31.1
 
 | Target | Where | Exports | Harness |
 |---|---|---|---|
