@@ -1,0 +1,102 @@
+From 530a2337173f14560062d5afdf1aa9b730dfa365 Mon Sep 17 00:00:00 2001
+From: Dario Gabriel Lipicar <dario@status.im>
+Date: Tue, 24 Nov 2026 10:50:34 -0300
+Subject: [PATCH 6/6] index: restore the filter index's height entries after a
+ reorg and an unclean exit
+
+The block filter index writes a block's height entry as the block
+connects, but its best block only when the chainstate is flushed. A
+reorg past the saved best block overwrites the height entries down to
+the fork, after copying the saved branch's entries to the hash index.
+If the process then dies before the next flush, the next start finds
+the height entry at the saved best block naming the other branch, and
+init fails with "Cannot read last block filter header; index may be
+corrupted" (bitcoin/bitcoin#34261). On a pruned node the only way out
+was to download the chain again.
+
+At init, walk back from the saved best block while the height entries
+name other blocks, and put back each block's own entry from the hash
+index. Nothing is written when there is nothing to restore, and if an
+entry is missing from the hash index the existing check still fails.
+---
+ src/index/blockfilterindex.cpp | 28 ++++++++++++++++++++++++++++
+ src/index/blockfilterindex.h   |  3 +++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/src/index/blockfilterindex.cpp b/src/index/blockfilterindex.cpp
+index 67fa1fa..49566bf 100644
+--- a/src/index/blockfilterindex.cpp
++++ b/src/index/blockfilterindex.cpp
+@@ -14,6 +14,7 @@
+ #include <index/db_key.h>
+ #include <interfaces/chain.h>
+ #include <interfaces/types.h>
++#include <kernel/cs_main.h>
+ #include <serialize.h>
+ #include <streams.h>
+ #include <sync.h>
+@@ -23,6 +24,7 @@
+ #include <util/hasher.h>
+ #include <util/log.h>
+ #include <util/syserror.h>
++#include <validation.h>
+ 
+ #include <cerrno>
+ #include <exception>
+@@ -114,6 +116,7 @@ bool BlockFilterIndex::CustomInit(const std::optional<interfaces::BlockRef>& blo
+     }
+ 
+     if (block) {
++        RestoreHeightIndex(*block);
+         auto op_last_header = ReadFilterHeader(block->height, block->hash);
+         if (!op_last_header) {
+             LogError("Cannot read last block filter header; index may be corrupted");
+@@ -232,6 +235,31 @@ size_t BlockFilterIndex::WriteFilterToDisk(FlatFilePos& pos, const BlockFilter&
+     return data_size;
+ }
+ 
++// Heights are written as blocks connect, but the best block only when the chainstate is
++// flushed. After a reorg and an unclean shutdown the height entries from the saved best block
++// down to the fork can name the other branch; the reorg copied the saved ones to the hash index.
++void BlockFilterIndex::RestoreHeightIndex(const interfaces::BlockRef& block)
++{
++    AssertLockHeld(::cs_main);
++    CDBBatch batch(*m_db);
++    int restored{0};
++    for (const CBlockIndex* pindex{m_chainstate->m_blockman.LookupBlockIndex(block.hash)}; pindex; pindex = pindex->pprev) {
++        std::pair<uint256, DBVal> at_height;
++        if (!m_db->Read(index_util::DBHeightKey(pindex->nHeight), at_height)) break;
++        if (at_height.first == pindex->GetBlockHash()) break;
++        DBVal saved;
++        if (!m_db->Read(index_util::DBHashKey(pindex->GetBlockHash()), saved)) {
++            LogError("%s: no entry for block %s at height %d", GetName(), pindex->GetBlockHash().ToString(), pindex->nHeight);
++            return; // CustomInit's check reports it
++        }
++        batch.Write(index_util::DBHeightKey(pindex->nHeight), std::make_pair(pindex->GetBlockHash(), saved));
++        ++restored;
++    }
++    if (restored == 0) return;
++    LogInfo("%s: restored %d height entries left by a reorg before an unclean shutdown", GetName(), restored);
++    m_db->WriteBatch(batch, /*fSync=*/true);
++}
++
+ std::optional<uint256> BlockFilterIndex::ReadFilterHeader(int height, const uint256& expected_block_hash)
+ {
+     std::pair<uint256, DBVal> read_out;
+diff --git a/src/index/blockfilterindex.h b/src/index/blockfilterindex.h
+index 0bb4a74..cc75788 100644
+--- a/src/index/blockfilterindex.h
++++ b/src/index/blockfilterindex.h
+@@ -62,6 +62,9 @@ private:
+ 
+     std::optional<uint256> ReadFilterHeader(int height, const uint256& expected_block_hash);
+ 
++    /// Puts back the height entries an unclean shutdown after a reorg left naming the other branch.
++    void RestoreHeightIndex(const interfaces::BlockRef& block);
++
+ protected:
+     bool CustomInit(const std::optional<interfaces::BlockRef>& block) override;
+ 
+-- 
+2.54.0 (Apple Git-157)
+
