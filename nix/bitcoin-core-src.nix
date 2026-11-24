@@ -27,6 +27,8 @@ let
     "0004" = [ "src/httprpc.cpp" ];
     # A stop waited out -timeout for a connect() in flight; now it waits in interruptible slices.
     "0005" = [ "src/netbase.cpp" ];
+    # After a reorg and an unclean exit the filter index's height entries named the other branch.
+    "0006" = [ "src/index/blockfilterindex.cpp" "src/index/blockfilterindex.h" ];
   };
 
   allowCases = pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList (n: files:

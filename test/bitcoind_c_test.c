@@ -17,13 +17,16 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <direct.h>
+#include <process.h>
 #else
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #endif
@@ -480,6 +483,149 @@ static void tor_cycles(const char* workdir, const char* proxy, int cycles, int p
     CHECK(reached == cycles, "tor: only %d of %d cycles reached a peer", reached, cycles);
 }
 
+static int file_exists(const char* path)
+{
+    FILE* f = fopen(path, "r");
+    if (f) fclose(f);
+    return f != NULL;
+}
+
+// Polls getindexinfo until the filter index is synced at `height`.
+static int wait_filter_index(long long height)
+{
+    for (int i = 0; i < 200; ++i) {
+        char* q = rpc("syncwithvalidationinterfacequeue", NULL);
+        free(q);
+        char* idx = rpc("getindexinfo", "[\"basic block filter index\"]");
+        const int done = strstr(idx, "\"synced\":true") != NULL && json_int(idx, "best_block_height", -1) == height;
+        free(idx);
+        if (done) return 1;
+        sleep_ms(50);
+    }
+    return 0;
+}
+
+static void block_hash_at(int height, char* out, size_t n)
+{
+    char params[32];
+    snprintf(params, sizeof params, "[%d]", height);
+    char* r = rpc("getblockhash", params);
+    out[0] = 0;
+    json_str(r, "result", out, n);
+    free(r);
+}
+
+static int invalidate_and_mine(const char* hash, int blocks, const char* descriptor)
+{
+    char params[160];
+    snprintf(params, sizeof params, "[\"%s\"]", hash);
+    char* inv = rpc("invalidateblock", params);
+    int ok = ok_reply(inv);
+    free(inv);
+    snprintf(params, sizeof params, "[%d,\"%s\"]", blocks, descriptor);
+    char* mined = rpc("generatetodescriptor", params);
+    ok = ok && ok_reply(mined);
+    free(mined);
+    return ok;
+}
+
+// The child half of reorg_then_kill: 20 blocks flushed, a reorg of the last two that is never
+// flushed, then "ready" and a wait for the parent's kill. Exits non-zero on any failure.
+static int reorg_child(const char* dir)
+{
+    char argv[8192], marker[4096], hash[80];
+    regtest_argv(dir, argv, sizeof argv);
+    if (start_and_wait(argv) < 0) return 1;
+    char* mined = rpc("generatetodescriptor", "[20,\"raw(51)\"]");
+    int ok = ok_reply(mined);
+    free(mined);
+    ok = ok && wait_filter_index(20);
+    // Writes the chainstate, and so the index's best block, at height 20.
+    ok = ok && BITCOIND_flush() == 0 && wait_filter_index(20);
+    block_hash_at(19, hash, sizeof hash);
+    // Heights 19 and 20 now name the other branch; only the blocks' own entries say otherwise.
+    ok = ok && invalidate_and_mine(hash, 3, "raw(52)") && wait_filter_index(21);
+    if (!ok) return 1;
+    snprintf(marker, sizeof marker, "%s/ready", dir);
+    FILE* f = fopen(marker, "w");
+    if (!f) return 1;
+    fclose(f);
+    for (;;) sleep_ms(1000);
+}
+
+// bitcoin/bitcoin#34261: an unclean exit after a reorg left the filter index's height entries
+// on the other branch, and the next start failed with "index may be corrupted". A child
+// process builds that state and is killed; this process then starts the node on its datadir.
+static void reorg_then_kill(const char* self, const char* workdir)
+{
+    char dir[4096], marker[4096], argv[8192];
+    snprintf(dir, sizeof dir, "%s/reorg-kill", workdir);
+    mkdir_p(dir);
+    snprintf(marker, sizeof marker, "%s/ready", dir);
+    remove(marker);
+#ifdef _WIN32
+    const intptr_t child = _spawnl(_P_NOWAIT, self, self, "--reorg-child", dir, NULL);
+    CHECK(child != -1, "reorg-kill: cannot spawn the child");
+    if (child == -1) return;
+    int exited = 0;
+    for (int i = 0; i < 1200 && !file_exists(marker) && !exited; ++i) {
+        exited = WaitForSingleObject((HANDLE)child, 0) == WAIT_OBJECT_0;
+        sleep_ms(100);
+    }
+    TerminateProcess((HANDLE)child, 9);
+    WaitForSingleObject((HANDLE)child, INFINITE);
+    CloseHandle((HANDLE)child);
+#else
+    const pid_t child = fork();
+    if (child == 0) {
+        execl(self, self, "--reorg-child", dir, (char*)NULL);
+        _exit(127);
+    }
+    CHECK(child > 0, "reorg-kill: cannot fork");
+    if (child <= 0) return;
+    int exited = 0, status = 0;
+    for (int i = 0; i < 1200 && !file_exists(marker) && !exited; ++i) {
+        exited = waitpid(child, &status, WNOHANG) == child;
+        sleep_ms(100);
+    }
+    if (!exited) {
+        kill(child, SIGKILL);
+        waitpid(child, &status, 0);
+    }
+#endif
+    CHECK(file_exists(marker), "reorg-kill: the child did not reach the killed state");
+    if (!file_exists(marker)) return;
+
+    regtest_argv(dir, argv, sizeof argv);
+    const long long up = start_and_wait(argv);
+    CHECK(up >= 0, "reorg-kill: the node did not start after the kill");
+    if (up < 0) {
+        BITCOIND_stop();
+        return;
+    }
+    char* info = rpc("getblockchaininfo", NULL);
+    const long long height = json_int(info, "blocks", -1);
+    free(info);
+    CHECK(height == 20, "reorg-kill: restarted at height %lld, want the flushed 20", height);
+    char old19[80], old20[80], params[160];
+    block_hash_at(19, old19, sizeof old19);
+    block_hash_at(20, old20, sizeof old20);
+    snprintf(params, sizeof params, "[\"%s\"]", old20);
+    char* f = rpc("getblockfilter", params);
+    CHECK(ok_reply(f), "reorg-kill: getblockfilter at the restored tip: %.300s", f);
+    free(f);
+    // Rewinding past the restored entries reads the header at 19, which must be this branch's.
+    const int reorged = invalidate_and_mine(old20, 2, "raw(53)") && wait_filter_index(21);
+    CHECK(reorged, "reorg-kill: a reorg on top of the restored entries failed");
+    snprintf(params, sizeof params, "[\"%s\"]", old19);
+    char* f19 = rpc("getblockfilter", params);
+    CHECK(ok_reply(f19), "reorg-kill: getblockfilter at 19: %.300s", f19);
+    free(f19);
+    const long long down = stop_timed();
+    printf("ok   reorg, kill, restart: running in %lld ms at height %lld, filters served, reorged again, stopped in %lld ms\n",
+           up, height, down);
+}
+
 int main(int argc, char** argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -491,6 +637,7 @@ int main(int argc, char** argv)
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
+    if (argc == 3 && strcmp(argv[1], "--reorg-child") == 0) return reorg_child(argv[2]);
     const char* workdir = argv[1];
     const char* tor = NULL;
     int tor_cycles_n = 3, peer_timeout = 240;
@@ -567,6 +714,7 @@ int main(int argc, char** argv)
 
     rpc_server_cycles(workdir);
     stop_with_connect_in_flight(workdir);
+    reorg_then_kill(argv[0], workdir);
 
     if (tor) tor_cycles(workdir, tor, tor_cycles_n, peer_timeout);
 

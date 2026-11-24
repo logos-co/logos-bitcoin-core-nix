@@ -31,6 +31,10 @@ returns is owned by the caller and released with `BITCOIND_free`.
 | `BITCOIND_flush()` | `ForceFlushStateToDisk(false)`: writes the UTXO cache and keeps it |
 | `BITCOIND_last_error()`, `BITCOIND_free()`, `BITCOIND_version()` | |
 
+When a start ends in `FAILED` without an error message from Core, `lastError` holds the last
+three error lines Core logged during init: some failures, such as a corrupt index, reach only
+`debug.log`.
+
 There is no HTTP server and no port: RPC is a function call. Core registers every RPC
 command whether or not `-server` is set, and until init finishes `BITCOIND_rpc` answers
 Core's own "in warmup" error with the current init message.
@@ -54,7 +58,7 @@ one cycle. The wrapper (`shim/bitcoind_c.cpp`) makes a stopped node startable ag
   return, `Shutdown`, `DisconnectTestLogger()`, `ReleaseDirectoryLocks()`. `Shutdown` renames
   its thread, so it runs on the node's own thread, never the caller's.
 
-Five patches, each held to an allowlist that `nix/bitcoin-core-src.nix` checks at build time:
+Six patches, each held to an allowlist that `nix/bitcoin-core-src.nix` checks at build time:
 
 | Patch | Files | Why |
 |---|---|---|
@@ -63,6 +67,7 @@ Five patches, each held to an allowlist that `nix/bitcoin-core-src.nix` checks a
 | 0003 | `src/rpc/server.cpp` | Only for `-server=1`: `InterruptRPC`/`StopRPC` ran once per process through static `std::once_flag`s, so a second stop aborted on `StopRPC`'s assert. Now once per start |
 | 0004 | `src/httprpc.cpp` | Only for `-server=1`: `g_rpcauth` and `g_rpc_whitelist` only grew, so a restarted server accepted the previous cookie and intersected the previous whitelists |
 | 0005 | `src/netbase.cpp` | `ConnectToSocket` waited out `-timeout` (5 s) for a `connect()` in flight, and `Shutdown` joins the connection threads, so a stop could take 5 s. It now waits in 100 ms slices and gives up once `g_socks5_interrupt`, which `CConnman::Interrupt()` already sets, is set. `-timeout` itself is unchanged |
+| 0006 | `src/index/blockfilterindex.cpp`, `src/index/blockfilterindex.h` | The filter index writes height entries as blocks connect but its best block only at a flush. After a reorg past the saved best block and an unclean exit, the entries from it down to the fork named the other branch and init failed with "index may be corrupted" ([bitcoin/bitcoin#34261](https://github.com/bitcoin/bitcoin/issues/34261), open upstream). Init now puts back each block's own entry, which the reorg had copied to the hash index |
 
 Consensus, validation, P2P code and the RPC methods are upstream's.
 
@@ -92,7 +97,9 @@ The harness drives only the C ABI: refusals before a start, three start/stop cyc
 regtest that mine blocks and read them back with `getblockchaininfo`, `getblockhash`,
 `getblock` and `getblockfilter`, a network switch, two `-server=1` cycles that call Core's HTTP
 server with each start's cookie and `-rpcwhitelist` (and the previous cookie, which must fail),
-three stops while `connect()`s to blackholed `-addnode`s are in flight (under 2 s each), and with `--tor[=host:port]` signet cycles through the SOCKS proxy that report whether each
+three stops while `connect()`s to blackholed `-addnode`s are in flight (under 2 s each), a
+reorg left unflushed in a child process that is then killed, after which the node must start on
+that datadir and serve and reorg its filters again, and with `--tor[=host:port]` signet cycles through the SOCKS proxy that report whether each
 cycle reached a peer. On Windows, copy `packages.x86_64-windows.bitcoind-c-test`'s `bin/` over
 and run `bitcoind-c-test.exe <workdir>`; CI does that under wine and on windows-latest.
 
