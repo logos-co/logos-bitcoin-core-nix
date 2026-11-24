@@ -31,6 +31,10 @@ returns is owned by the caller and released with `BITCOIND_free`.
 | `BITCOIND_flush()` | `ForceFlushStateToDisk(false)`: writes the UTXO cache and keeps it |
 | `BITCOIND_last_error()`, `BITCOIND_free()`, `BITCOIND_version()` | |
 
+When a start ends in `FAILED` without an error message from Core, `lastError` holds the last
+three error lines Core logged during init: some failures, such as a corrupt index, reach only
+`debug.log`.
+
 There is no HTTP server and no port: RPC is a function call. Core registers every RPC
 command whether or not `-server` is set, and until init finishes `BITCOIND_rpc` answers
 Core's own "in warmup" error with the current init message.

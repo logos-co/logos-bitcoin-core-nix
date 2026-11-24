@@ -35,6 +35,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -105,6 +106,32 @@ void record_error(const std::string& msg)
 {
     std::lock_guard<std::mutex> lock(g_info_mutex);
     if (g_error.empty()) g_error = msg;
+}
+
+// Some init failures only reach the log (a corrupt index returns false without InitError),
+// so the last error lines of an init stand in for lastError when nothing else was recorded.
+constexpr size_t kInitErrorLines = 3;
+std::deque<std::string> g_init_errors; // guarded by g_info_mutex
+std::atomic<bool> g_capturing_init{false};
+
+void on_log_line(const std::string& line)
+{
+    if (!g_capturing_init) return;
+    size_t at = line.find("error] ");
+    if (at == std::string::npos || at == 0 || (line[at - 1] != '[' && line[at - 1] != ':')) return;
+    std::string msg = line.substr(at + 7);
+    while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) msg.pop_back();
+    if (msg.empty()) return;
+    std::lock_guard<std::mutex> lock(g_info_mutex);
+    g_init_errors.push_back(std::move(msg));
+    if (g_init_errors.size() > kInitErrorLines) g_init_errors.pop_front();
+}
+
+void record_init_errors()
+{
+    std::lock_guard<std::mutex> lock(g_info_mutex);
+    if (!g_error.empty() || g_init_errors.empty()) return;
+    for (const auto& e : g_init_errors) g_error += (g_error.empty() ? "" : "; ") + e;
 }
 
 char* dup_c(const std::string& s)
@@ -212,6 +239,13 @@ void node_main()
     util::ThreadSetInternalName("init");
     node::NodeContext& node = *g_node;
     bool ok = false;
+    {
+        std::lock_guard<std::mutex> lock(g_info_mutex);
+        g_init_errors.clear();
+    }
+    g_capturing_init = true;
+    // Also replays what was logged before the file opened; DisconnectTestLogger removes it.
+    LogInstance().PushBackCallback(on_log_line);
     try {
         InitLogging(gArgs);
         InitParameterInteraction(gArgs);
@@ -233,6 +267,8 @@ void node_main()
         record_error("init: unknown exception");
         ok = false;
     }
+    g_capturing_init = false;
+    if (!ok && !g_stop_requested) record_init_errors();
     if (!ok && node.exit_status == EXIT_SUCCESS) node.exit_status = EXIT_FAILURE;
 
     if (ok && !ShutdownRequested(node)) {
