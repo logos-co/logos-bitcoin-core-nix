@@ -4,13 +4,13 @@
 { pkgs }:
 
 let
-  version = "31.2";
+  version = "31.3";
 
   upstream = pkgs.fetchFromGitHub {
     owner = "bitcoin";
     repo = "bitcoin";
     tag = "v${version}";
-    hash = "sha256-G81GpKL3hZQhbJ+o4NoZRAhVQ5RHRZLv/slGes+25Qw=";
+    hash = "sha256-xK2Dz3QoqMS6qxzrAR4EN+lczbTValn6o7mLHfKSBrs=";
   };
 
   patchDir = ../patches/bitcoin;
