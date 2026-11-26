@@ -4,7 +4,7 @@ Bitcoin Core's node, built as a shared library with a C ABI, so a Logos module c
 in-process instead of supervising a `bitcoind` executable.
 
 ```
-packages.<target>.bitcoin-core-src   # Bitcoin Core v31.2 (tag, by hash) + patches/bitcoin
+packages.<target>.bitcoin-core-src   # Bitcoin Core v31.3 (tag, by hash) + patches/bitcoin
 packages.<target>.libbitcoind_c      # libbitcoind_c: the node behind the C ABI in shim/bitcoind_c.h
 packages.<target>.libevent           # libevent 2.1.12 as Core's depends builds it, static
 packages.<target>.bitcoind-c-test    # the C test harness
@@ -102,6 +102,13 @@ reorg left unflushed in a child process that is then killed, after which the nod
 that datadir and serve and reorg its filters again, and with `--tor[=host:port]` signet cycles through the SOCKS proxy that report whether each
 cycle reached a peer. On Windows, copy `packages.x86_64-windows.bitcoind-c-test`'s `bin/` over
 and run `bitcoind-c-test.exe <workdir>`; CI does that under wine and on windows-latest.
+
+## Verified, 2026-11-26: 31.3
+
+The six patches apply to v31.3 unchanged. Its only source changes since 31.2 are in
+`src/net_processing.cpp` (#35878, unique tx INVs) and `CMakeLists.txt`, which none of the patches
+touches. On aarch64-darwin the harness passes: cycles in 157–262 ms to running and 171–211 ms to
+stop, stops with connects in flight in 164–239 ms, and the reorg, kill, restart test passes.
 
 ## Verified, 2026-10-28: 31.2
 
